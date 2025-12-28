@@ -667,6 +667,51 @@ button:disabled {
   font-weight: 700;
 }
 
+.warning-footer {
+  margin-top: 12px;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid rgba(255, 123, 123, 0.45);
+  background: linear-gradient(
+    120deg,
+    rgba(255, 123, 123, 0.14),
+    rgba(124, 107, 255, 0.12)
+  );
+  color: var(--text);
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.28);
+}
+
+.warning-footer__icon {
+  width: 32px;
+  height: 32px;
+  border-radius: 10px;
+  background: rgba(255, 123, 123, 0.3);
+  color: var(--text);
+  display: grid;
+  place-items: center;
+  font-weight: 800;
+  font-size: 16px;
+  border: 1px solid rgba(255, 123, 123, 0.5);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+}
+
+.warning-footer__title {
+  margin: 0;
+  letter-spacing: 0.08em;
+  font-size: 12px;
+  text-transform: uppercase;
+  color: rgba(255, 255, 255, 0.82);
+}
+
+.warning-footer__text {
+  margin: 2px 0 0;
+  color: var(--text);
+  opacity: 0.9;
+}
+
 @media (max-width: 720px) {
   .guess {
     grid-template-columns: 1fr;

@@ -413,7 +413,9 @@ function App() {
                     <input
                       id="guessInput"
                       className="guess-input"
-                      type="text"
+                      type="tel"
+                      inputMode="numeric"
+                      pattern="[0-9]*"
                       value={guessValue}
                       onChange={(event) => setGuessValue(event.target.value)}
                       disabled={!canGuess || !!winner}
@@ -511,6 +513,16 @@ function App() {
             )}
           </section>
         )}
+
+        <footer className="warning-footer" role="alert" aria-live="polite">
+          <div className="warning-footer__icon" aria-hidden="true">!</div>
+          <div>
+            <p className="warning-footer__title">Warning</p>
+            <p className="warning-footer__text">
+              Refreshing this page will clear all current players and progress.
+            </p>
+          </div>
+        </footer>
       </div>
     </div>
   );
