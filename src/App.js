@@ -475,7 +475,7 @@ function App() {
               <div className="feed__header">
                 <p className="label">Guess History</p>
                 <span className="muted">
-                  Everyone sees higher / lower in real-time.
+                  See all the guesses made this round
                 </span>
               </div>
 
