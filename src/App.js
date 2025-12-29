@@ -3,6 +3,21 @@ import './App.css';
 
 const generateTarget = (max) => Math.max(1, Math.floor(Math.random() * max) + 1);
 const uid = () => `p-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+const basePlayer = (overrides = {}) => ({
+  id: uid(),
+  name: 'Player',
+  wins: 0,
+  streak: 0,
+  ...overrides,
+});
+const shufflePlayers = (list) => {
+  const copy = [...list];
+  for (let i = copy.length - 1; i > 0; i -= 1) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [copy[i], copy[j]] = [copy[j], copy[i]];
+  }
+  return copy;
+};
 
 function App() {
   const [maxNumber, setMaxNumber] = useState(50);
@@ -16,10 +31,13 @@ function App() {
   const [winner, setWinner] = useState(null);
   const [error, setError] = useState('');
   const [mode, setMode] = useState('solo'); // solo | multiplayer
+  const [gameMode, setGameMode] = useState('exact'); // exact | quickfire
   const [removeTargetId, setRemoveTargetId] = useState(null);
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
   const [feedbackCue, setFeedbackCue] = useState(null); // higher | lower | correct
   const isLocked = status !== 'waiting';
+  const isQuickfire = gameMode === 'quickfire';
+  const isMultiplayerMode = isQuickfire || mode === 'multiplayer';
 
   const currentPlayer = players.length
     ? players[currentPlayerIndex % players.length]
@@ -43,7 +61,7 @@ function App() {
       return;
     }
 
-    const newPlayer = { id: uid(), name };
+    const newPlayer = basePlayer({ id: uid(), name });
     setPlayers((prev) => [...prev, newPlayer]);
     setPlayerName('');
     setError('');
@@ -65,13 +83,23 @@ function App() {
   const startRound = () => {
     setError('');
 
-    if (mode === 'multiplayer' && players.length === 0) {
+    if (isMultiplayerMode && players.length === 0) {
       setError('Add at least one player before starting.');
       return;
     }
 
-    const preparedPlayers =
-      mode === 'solo' ? [{ id: 'solo', name: 'Solo' }] : [...players];
+    if (isQuickfire && players.length < 2) {
+      setError('Quickfire needs at least two players.');
+      return;
+    }
+
+    const preparedPlayers = isMultiplayerMode
+      ? shufflePlayers(players).map((player) => ({
+          ...player,
+          wins: player.wins ?? 0,
+          streak: player.streak ?? 0,
+        }))
+      : [basePlayer({ id: 'solo', name: 'Solo' })];
 
     setPlayers(preparedPlayers);
     setTargetNumber(generateTarget(maxNumber));
@@ -82,6 +110,7 @@ function App() {
     setCurrentPlayerIndex(0);
     setRemoveTargetId(null);
     setControlsCollapsed(true);
+    setFeedbackCue(null);
   };
 
   const handleGuess = (event) => {
@@ -101,6 +130,12 @@ function App() {
       return;
     }
 
+    const duplicateGuess = guesses.some((guess) => guess.value === parsedGuess);
+    if (duplicateGuess) {
+      setError('That number was already guessed this round. Pick a new one.');
+      return;
+    }
+
     const feedback =
       parsedGuess === targetNumber
         ? 'correct'
@@ -108,17 +143,64 @@ function App() {
           ? 'higher'
           : 'lower';
 
+    const timestamp = Date.now();
     const entry = {
-      id: `${Date.now()}-${parsedGuess}`,
+      id: `${timestamp}-${parsedGuess}`,
       player: currentPlayer.name,
+      playerId: currentPlayer.id,
       value: parsedGuess,
       feedback,
+      createdAt: timestamp,
     };
+
+    if (isQuickfire) {
+      const alreadyGuessed = guesses.some(
+        (guess) => guess.playerId === currentPlayer.id
+      );
+
+      if (alreadyGuessed) {
+        setError('Each player only gets one guess in Quickfire.');
+        return;
+      }
+
+      const nextGuesses = [...guesses, entry];
+      const everyoneGuessed =
+        players.length > 0 &&
+        players.every((player) =>
+          nextGuesses.some((guess) => guess.playerId === player.id)
+        );
+
+      const winningGuess = [...nextGuesses].sort((a, b) => {
+        const diffA = Math.abs(a.value - targetNumber);
+        const diffB = Math.abs(b.value - targetNumber);
+        if (diffA !== diffB) return diffA - diffB;
+        return a.createdAt - b.createdAt; // earliest wins ties
+      })[0];
+
+      setGuesses(nextGuesses);
+      setGuessValue('');
+      setError('');
+      setFeedbackCue({ type: feedback, id: timestamp });
+
+      if ((feedback === 'correct' || everyoneGuessed) && winningGuess?.playerId) {
+        applyQuickfireWin(winningGuess.playerId);
+      } else if (!everyoneGuessed) {
+        const nextPlayerIndex = players.findIndex(
+          (player) => !nextGuesses.some((guess) => guess.playerId === player.id)
+        );
+
+        if (nextPlayerIndex >= 0) {
+          setCurrentPlayerIndex(nextPlayerIndex);
+        }
+      }
+
+      return;
+    }
 
     setGuesses((prev) => [entry, ...prev]);
     setGuessValue('');
     setError('');
-    setFeedbackCue({ type: feedback, id: Date.now() });
+    setFeedbackCue({ type: feedback, id: timestamp });
 
     if (feedback === 'correct') {
       setWinner(currentPlayer);
@@ -158,6 +240,13 @@ function App() {
   };
 
   const handleRemovePlayer = (playerId) => {
+    const target = players.find((player) => player.id === playerId);
+    const confirmed = window.confirm(
+      `Remove ${target?.name ?? 'this player'} from the game?`
+    );
+
+    if (!confirmed) return;
+
     const updated = players.filter((player) => player.id !== playerId);
 
     if (updated.length === 0) {
@@ -183,6 +272,29 @@ function App() {
     }
   };
 
+  const applyQuickfireWin = (winnerId) => {
+    setPlayers((prev) => {
+      const updated = prev.map((player) => {
+        if (player.id === winnerId) {
+          return {
+            ...player,
+            wins: (player.wins ?? 0) + 1,
+            streak: (player.streak ?? 0) + 1,
+          };
+        }
+        return { ...player, streak: 0 };
+      });
+
+      const nextWinner = updated.find((player) => player.id === winnerId);
+      if (nextWinner) {
+        setWinner(nextWinner);
+        setStatus('won');
+      }
+
+      return updated;
+    });
+  };
+
   const handleModeChange = (nextMode) => {
     setMode(nextMode);
     setStatus('waiting');
@@ -194,6 +306,22 @@ function App() {
     setControlsCollapsed(false);
     if (nextMode === 'solo') {
       setPlayers([]);
+      setGameMode('exact');
+    }
+  };
+
+  const handleGameModeChange = (nextMode) => {
+    setGameMode(nextMode);
+    setStatus('waiting');
+    setWinner(null);
+    setGuesses([]);
+    setGuessValue('');
+    setCurrentPlayerIndex(0);
+    setRemoveTargetId(null);
+    setControlsCollapsed(false);
+    setError('');
+    if (nextMode === 'quickfire') {
+      setMode('multiplayer');
     }
   };
 
@@ -254,6 +382,31 @@ function App() {
                   >
                     Multiplayer
                   </button>
+                </div>
+
+                <div className="control">
+                  <label htmlFor="gameMode">Game mode</label>
+                  <div className="mode-switch">
+                    <button
+                      type="button"
+                      className={gameMode === 'exact' ? '' : 'ghost'}
+                      onClick={() => handleGameModeChange('exact')}
+                      disabled={isLocked}
+                    >
+                      Exact match
+                    </button>
+                    <button
+                      type="button"
+                      className={gameMode === 'quickfire' ? '' : 'ghost'}
+                      onClick={() => handleGameModeChange('quickfire')}
+                      disabled={isLocked || mode === 'solo'}
+                    >
+                      Quickfire closest
+                    </button>
+                  </div>
+                  <small>
+                    Quickfire is multiplayer only. Everyone guesses once and the closest to the number wins.
+                  </small>
                 </div>
 
                 <div className="control">
@@ -345,19 +498,51 @@ function App() {
                   players.map((player, index) => {
                     const isCurrent = index === currentPlayerIndex;
                     const isFlipped = removeTargetId === player.id;
+                    const playerWins = player.wins ?? 0;
+                    const playerStreak = player.streak ?? 0;
+                    const hasHotStreak = playerStreak >= 3;
+                    const flameLevel = Math.max(0, Math.min(playerStreak, 8));
+                    const flameScale = 1 + flameLevel * 0.14;
 
                     return (
                       <div
                         key={player.id}
                         className={`chip ${isCurrent ? 'chip--active' : ''} ${
                           isFlipped ? 'chip--flipped' : ''
-                        }`}
+                        } ${hasHotStreak ? 'chip--hot' : ''}`}
                         onClick={() => setRemoveTargetId(isFlipped ? null : player.id)}
                       >
                         <div className="chip__inner">
                           <div className="chip__face chip__face--front">
-                            <span>{player.name}</span>
-                            {winner?.id === player.id && <span className="chip__tag">Winner</span>}
+                            <div className="chip__front">
+                              <div className="chip__top">
+                                <div className="chip__name-wrap">
+                                  <span className="chip__name">{player.name}</span>
+                                  {playerStreak > 0 && (
+                                    <div
+                                      className="chip__flame"
+                                      style={{ '--flame-scale': flameScale }}
+                                      aria-label={`Streak ${playerStreak}`}
+                                    />
+                                  )}
+                                  {winner?.id === player.id && <span className="chip__tag">Winner</span>}
+                                </div>
+                              </div>
+                            {isQuickfire && (
+                              <div className="chip__meta">
+                                <span className="chip__stat">Wins: {playerWins}</span>
+                                {playerStreak > 0 && (
+                                  <span
+                                    className={`chip__stat chip__stat--streak ${
+                                      hasHotStreak ? 'chip__stat--glow' : ''
+                                    }`}
+                                  >
+                                    Streak: {playerStreak}
+                                  </span>
+                                )}
+                              </div>
+                            )}
+                            </div>
                           </div>
                           <div className="chip__face chip__face--back">
                             <button
@@ -395,11 +580,15 @@ function App() {
                   </p>
                 ) : (
                   <p className="status__player">
-                    {mode === 'solo'
-                      ? 'Solo mode'
-                      : currentPlayer
-                        ? `${currentPlayer.name} is up`
-                        : 'Waiting for players to join'}
+                    {isQuickfire
+                      ? currentPlayer
+                        ? `${currentPlayer.name} is up (Quickfire closest)`
+                        : 'Waiting for players to join'
+                      : mode === 'solo'
+                        ? 'Solo mode'
+                        : currentPlayer
+                          ? `${currentPlayer.name} is up`
+                          : 'Waiting for players to join'}
                   </p>
                 )}
               </div>
@@ -462,8 +651,10 @@ function App() {
             ) : (
               <div className="guess guess--winner">
                 <p className="status__winner">
-                  Congrats {winner.name}! The number was {targetNumber}. It took {guesses.length}{' '}
-                  {guesses.length === 1 ? 'guess' : 'guesses'}.
+                  Congrats {winner.name}! The number was {targetNumber}.{' '}
+                  {isQuickfire
+                    ? 'Quickfire is one round - closest guess wins.'
+                    : `It took ${guesses.length} ${guesses.length === 1 ? 'guess' : 'guesses'}.`}
                 </p>
                 <button type="button" className="play-again" onClick={startRound}>
                   Play again
@@ -491,12 +682,18 @@ function App() {
                         <p className="guess-row__name">{guess.player}</p>
                         <p className="muted">guessed {guess.value}</p>
                       </div>
-                      <span className={`pill pill--${guess.feedback}`}>
-                        {guess.feedback === 'correct'
-                          ? 'Correct!'
-                          : guess.feedback === 'higher'
-                            ? 'Go higher'
-                            : 'Go lower'}
+                      <span
+                        className={`pill pill--${
+                          isQuickfire && winner?.id === guess.playerId ? 'correct' : guess.feedback
+                        }`}
+                      >
+                        {isQuickfire && winner?.id === guess.playerId
+                          ? 'Closest'
+                          : guess.feedback === 'correct'
+                            ? 'Correct!'
+                            : guess.feedback === 'higher'
+                              ? 'Go higher'
+                              : 'Go lower'}
                       </span>
                     </li>
                   ))}
@@ -529,3 +726,4 @@ function App() {
 }
 
 export default App;
+
