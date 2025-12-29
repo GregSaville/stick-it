@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import './App.css';
 
 const generateTarget = (max) => Math.max(1, Math.floor(Math.random() * max) + 1);
@@ -35,9 +35,14 @@ function App() {
   const [removeTargetId, setRemoveTargetId] = useState(null);
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
   const [feedbackCue, setFeedbackCue] = useState(null); // higher | lower | correct
-  const isLocked = status !== 'waiting';
+  const [restartSpinning, setRestartSpinning] = useState(false);
+  const restartSpinTimer = useRef(null);
+  const chipRefs = useRef(new Map());
+  const isLocked = status === 'active';
   const isQuickfire = gameMode === 'quickfire';
   const isMultiplayerMode = isQuickfire || mode === 'multiplayer';
+  const canAddPlayersNow =
+    mode === 'multiplayer' && (status === 'waiting' || status === 'won');
 
   const currentPlayer = players.length
     ? players[currentPlayerIndex % players.length]
@@ -67,7 +72,7 @@ function App() {
     setError('');
   };
 
-  const restartGame = () => {
+  const restartGame = (resetPlayers = false) => {
     setGuesses([]);
     setWinner(null);
     setGuessValue('');
@@ -78,6 +83,10 @@ function App() {
     setTargetNumber(generateTarget(maxNumber));
     setFeedbackCue(null);
     setControlsCollapsed(false);
+    if (resetPlayers) {
+      setPlayers([]);
+      setMode('multiplayer');
+    }
   };
 
   const startRound = () => {
@@ -123,10 +132,10 @@ function App() {
     const parsedGuess = Number(guessValue);
     if (
       !Number.isInteger(parsedGuess) ||
-      parsedGuess < 1 ||
-      parsedGuess > maxNumber
+      parsedGuess < effectiveMin ||
+      parsedGuess > effectiveMax
     ) {
-      setError(`Enter a whole number between 1 and ${maxNumber}.`);
+      setError(`Enter a whole number between ${effectiveMin} and ${effectiveMax}.`);
       return;
     }
 
@@ -180,10 +189,10 @@ function App() {
       setGuesses(nextGuesses);
       setGuessValue('');
       setError('');
-      setFeedbackCue({ type: feedback, id: timestamp });
+      setFeedbackCue(feedback === 'correct' ? { type: feedback, id: timestamp } : null);
 
       if ((feedback === 'correct' || everyoneGuessed) && winningGuess?.playerId) {
-        applyQuickfireWin(winningGuess.playerId);
+        applyWin(winningGuess.playerId);
       } else if (!everyoneGuessed) {
         const nextPlayerIndex = players.findIndex(
           (player) => !nextGuesses.some((guess) => guess.playerId === player.id)
@@ -203,8 +212,12 @@ function App() {
     setFeedbackCue({ type: feedback, id: timestamp });
 
     if (feedback === 'correct') {
-      setWinner(currentPlayer);
-      setStatus('won');
+      if (mode === 'multiplayer') {
+        applyWin(currentPlayer.id);
+      } else {
+        setWinner(currentPlayer);
+        setStatus('won');
+      }
     } else {
       setCurrentPlayerIndex((prev) =>
         players.length ? (prev + 1) % players.length : 0
@@ -217,6 +230,54 @@ function App() {
     const timer = setTimeout(() => setFeedbackCue(null), 1400);
     return () => clearTimeout(timer);
   }, [feedbackCue]);
+
+  useEffect(() => {
+    if (!removeTargetId) return undefined;
+    const handleOutsideClick = (event) => {
+      const target = event.target;
+      const currentChip = chipRefs.current.get(removeTargetId);
+      if (!currentChip) {
+        setRemoveTargetId(null);
+        return;
+      }
+
+      const clickedRemove =
+        target?.closest && target.closest('.chip__remove');
+      const insideCurrentChip =
+        target?.closest && target.closest(`[data-player-id="${removeTargetId}"]`);
+
+      if (clickedRemove || insideCurrentChip) {
+        return;
+      }
+
+      setRemoveTargetId(null);
+    };
+
+    document.addEventListener('click', handleOutsideClick);
+    return () => document.removeEventListener('click', handleOutsideClick);
+  }, [removeTargetId]);
+
+  useEffect(() => () => {
+    if (restartSpinTimer.current) {
+      clearTimeout(restartSpinTimer.current);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!removeTargetId) return undefined;
+    const node = chipRefs.current.get(removeTargetId);
+    if (!node || typeof IntersectionObserver === 'undefined') return undefined;
+
+    const observer = new IntersectionObserver((entries) => {
+      const [entry] = entries;
+      if (entry && !entry.isIntersecting) {
+        setRemoveTargetId(null);
+      }
+    });
+
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [removeTargetId]);
 
   const removeWinner = () => {
     if (!winner) return;
@@ -272,7 +333,7 @@ function App() {
     }
   };
 
-  const applyQuickfireWin = (winnerId) => {
+  const applyWin = (winnerId) => {
     setPlayers((prev) => {
       const updated = prev.map((player) => {
         if (player.id === winnerId) {
@@ -296,6 +357,13 @@ function App() {
   };
 
   const handleModeChange = (nextMode) => {
+    if (nextMode === 'solo' && mode === 'multiplayer' && players.length > 0) {
+      const confirmed = window.confirm(
+        'Switching to Solo will clear the current lobby and reset all win/streak data. Continue?'
+      );
+      if (!confirmed) return;
+    }
+
     setMode(nextMode);
     setStatus('waiting');
     setWinner(null);
@@ -325,17 +393,47 @@ function App() {
     }
   };
 
-  const inRangeHint = `1 to ${maxNumber}`;
+  const guessFontSize = (() => {
+    const valueLength = guessValue ? guessValue.replace(/\D/g, '').length : 0;
+    const maxDigits = Math.max(valueLength || 1, String(maxNumber).length);
+    const baseSize = 42;
+    const minSize = 24;
+    if (maxDigits <= 3) return baseSize;
+    const digitSpan = 7 - 3; // scales from 101 up to the 1,000,000 cap
+    const shrinkRatio = Math.min((maxDigits - 3) / digitSpan, 1);
+    return Math.round(baseSize - (baseSize - minSize) * shrinkRatio);
+  })();
+
+  const lowerBound = guesses
+    .filter((guess) => guess.feedback === 'higher')
+    .reduce((bound, guess) => Math.max(bound, Math.min(maxNumber, guess.value + 1)), 1);
+
+  const upperBound = guesses
+    .filter((guess) => guess.feedback === 'lower')
+    .reduce((bound, guess) => Math.min(bound, Math.max(1, guess.value - 1)), maxNumber);
+
+  let effectiveMin = isQuickfire ? 1 : lowerBound;
+  let effectiveMax = isQuickfire ? maxNumber : upperBound;
+
+  if (effectiveMin > effectiveMax) {
+    const collapsed = Math.max(1, Math.min(effectiveMin, effectiveMax));
+    effectiveMin = collapsed;
+    effectiveMax = collapsed;
+  }
+
+  const inRangeHint = `${effectiveMin} to ${effectiveMax}`;
   const canGuess = status === 'active' && players.length > 0;
+  const showGuessFeedback = feedbackCue && (!isQuickfire || feedbackCue.type === 'correct');
+  const modeLabel = gameMode === 'exact' ? 'Exact Match' : 'Quickfire Closest';
 
   return (
     <div className="app">
       <div className="shell">
         <header className="hero">
           <p className="eyebrow">Stick-It</p>
-          <h1>Pass &amp; Play Number Guess</h1>
+          <h1>A Digital Pass &amp; Play Number Guessing Game</h1>
           <p className="lede">
-            Setup a quick number guessing game to settle whatever your predicament may be
+            Setup a quick number guessing game and settle whatever your predicament may be!
           </p>
         </header>
 
@@ -387,27 +485,33 @@ function App() {
                 <div className="control">
                   <label htmlFor="gameMode">Game mode</label>
                   <div className="mode-switch">
-                    <button
-                      type="button"
-                      className={gameMode === 'exact' ? '' : 'ghost'}
-                      onClick={() => handleGameModeChange('exact')}
-                      disabled={isLocked}
-                    >
-                      Exact match
-                    </button>
-                    <button
-                      type="button"
-                      className={gameMode === 'quickfire' ? '' : 'ghost'}
-                      onClick={() => handleGameModeChange('quickfire')}
-                      disabled={isLocked || mode === 'solo'}
-                    >
-                      Quickfire closest
-                    </button>
-                  </div>
-                  <small>
-                    Quickfire is multiplayer only. Everyone guesses once and the closest to the number wins.
-                  </small>
+                  <button
+                    type="button"
+                    className={`mode-btn ${gameMode === 'exact' ? 'mode-btn--active' : ''}`}
+                    onClick={() => handleGameModeChange('exact')}
+                    disabled={status === 'active'}
+                  >
+                    Exact match
+                  </button>
+                  <button
+                    type="button"
+                    className={`mode-btn ${gameMode === 'quickfire' ? 'mode-btn--active' : ''}`}
+                    onClick={() => handleGameModeChange('quickfire')}
+                    disabled={status === 'active' || mode === 'solo'}
+                  >
+                    Quickfire closest
+                  </button>
                 </div>
+                {gameMode === 'exact' ? (
+                  <small className="mode-description">
+                    Exact Match: the shrinking range locks in after each guess. Only an exact hit wins.
+                  </small>
+                ) : (
+                  <small className="mode-description">
+                    Quickfire Closest: everyone guesses once, closest wins. No higher/lower hints.
+                  </small>
+                )}
+              </div>
 
                 <div className="control">
                   <label htmlFor="maxNumber">Range (1 to X)</label>
@@ -448,16 +552,14 @@ function App() {
                   <button type="button" onClick={startRound} disabled={isLocked}>
                     Start
                   </button>
-                  {winner && status === 'won' && mode === 'multiplayer' && (
-                    <button type="button" className="ghost" onClick={removeWinner}>
-                      Remove winner and restart?
-                    </button>
-                  )}
-                  {isLocked && (
-                    <button type="button" className="restart" onClick={restartGame}>
-                      Restart game
-                    </button>
-                  )}
+                  <button
+                    type="button"
+                    className="ghost clear-round"
+                    onClick={() => restartGame(false)}
+                    disabled={status === 'waiting'}
+                  >
+                    Clear current round
+                  </button>
                 </div>
               </>
             )}
@@ -467,12 +569,12 @@ function App() {
             <section className="panel players-panel">
               <div className="panel__title">
                 <div>
-                  <p className="label">Add Players</p>
+                  <p className="label">Multiplayer Details</p>
                   <h3>Players ({players.length})</h3>
                 </div>
               </div>
 
-              {status === 'waiting' && (
+              {canAddPlayersNow ? (
                 <form className="add-player" onSubmit={addPlayer} autoComplete="off">
                   <input
                     type="text"
@@ -483,9 +585,7 @@ function App() {
                   />
                   <button type="submit">Add</button>
                 </form>
-              )}
-
-              {status !== 'waiting' && currentPlayer && (
+              ) : status !== 'waiting' && currentPlayer && (
                 <p className="status__player">
                   Current guesser: {currentPlayer.name}
                 </p>
@@ -510,6 +610,14 @@ function App() {
                         className={`chip ${isCurrent ? 'chip--active' : ''} ${
                           isFlipped ? 'chip--flipped' : ''
                         } ${hasHotStreak ? 'chip--hot' : ''}`}
+                        data-player-id={player.id}
+                        ref={(node) => {
+                          if (node) {
+                            chipRefs.current.set(player.id, node);
+                          } else {
+                            chipRefs.current.delete(player.id);
+                          }
+                        }}
                         onClick={() => setRemoveTargetId(isFlipped ? null : player.id)}
                       >
                         <div className="chip__inner">
@@ -528,7 +636,7 @@ function App() {
                                   {winner?.id === player.id && <span className="chip__tag">Winner</span>}
                                 </div>
                               </div>
-                            {isQuickfire && (
+                            {mode === 'multiplayer' && (
                               <div className="chip__meta">
                                 <span className="chip__stat">Wins: {playerWins}</span>
                                 {playerStreak > 0 && (
@@ -569,28 +677,48 @@ function App() {
         {status !== 'waiting' && (
           <section className="panel wide">
             <div className="panel__title">
-              <div>
-                <p className="label">Round</p>
-                <h3>Guess between {inRangeHint}</h3>
+              <div className="round-heading">
+                <div className="mode-display-wrap">
+                  <div className={`mode-display mode-display--${gameMode}`} aria-label={modeLabel}>
+                    <span className="mode-display__text">
+                      {gameMode === 'exact' ? (
+                        <>
+                          <span className="mode-display__word mode-display__word--exact">Exact</span>
+                          <span className="mode-display__word mode-display__word--match">Match</span>
+                        </>
+                      ) : (
+                        <span className="mode-display__word mode-display__word--quickfire">
+                          Quickfire Closest
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                </div>
               </div>
-              <div className="status">
-                {winner ? (
-                  <p className="status__winner">
-                    Baller!
-                  </p>
-                ) : (
-                  <p className="status__player">
-                    {isQuickfire
-                      ? currentPlayer
-                        ? `${currentPlayer.name} is up (Quickfire closest)`
-                        : 'Waiting for players to join'
-                      : mode === 'solo'
-                        ? 'Solo mode'
-                        : currentPlayer
+              <div className="round-line">
+                <div className="round-copy">
+                  <p className="label">Round</p>
+                  <h3>Guess between {inRangeHint}</h3>
+                </div>
+                <div className="status">
+                  {winner ? (
+                    <p className="status__winner">
+                      Baller!
+                    </p>
+                  ) : (
+                    <h3 className="status__player">
+                      {isQuickfire
+                        ? currentPlayer
                           ? `${currentPlayer.name} is up`
-                          : 'Waiting for players to join'}
-                  </p>
-                )}
+                          : 'Waiting for players to join'
+                        : mode === 'solo'
+                          ? 'Solo mode'
+                          : currentPlayer
+                            ? `${currentPlayer.name} is up`
+                            : 'Waiting for players to join'}
+                    </h3>
+                  )}
+                </div>
               </div>
             </div>
 
@@ -609,9 +737,10 @@ function App() {
                       onChange={(event) => setGuessValue(event.target.value)}
                       disabled={!canGuess || !!winner}
                       placeholder={`Enter ${inRangeHint}`}
+                      style={{ fontSize: `${guessFontSize}px` }}
                       autoComplete="off"
                     />
-                    {feedbackCue && (
+                    {showGuessFeedback && (
                       <div
                         className={`guess-feedback guess-feedback--${feedbackCue.type}`}
                       >
@@ -680,21 +809,27 @@ function App() {
                     <li key={guess.id} className="guess-row">
                       <div>
                         <p className="guess-row__name">{guess.player}</p>
-                        <p className="muted">guessed {guess.value}</p>
+                        <p className="muted">
+                          guessed <span className="guess-row__value">{guess.value}</span>
+                        </p>
                       </div>
-                      <span
-                        className={`pill pill--${
-                          isQuickfire && winner?.id === guess.playerId ? 'correct' : guess.feedback
-                        }`}
-                      >
-                        {isQuickfire && winner?.id === guess.playerId
-                          ? 'Closest'
-                          : guess.feedback === 'correct'
+                      {isQuickfire ? (
+                        <span
+                          className={`pill pill--${
+                            winner?.id === guess.playerId ? 'correct' : 'neutral'
+                          }`}
+                        >
+                          {winner?.id === guess.playerId ? 'Closest' : 'Guess'}
+                        </span>
+                      ) : (
+                        <span className={`pill pill--${guess.feedback}`}>
+                          {guess.feedback === 'correct'
                             ? 'Correct!'
                             : guess.feedback === 'higher'
                               ? 'Go higher'
                               : 'Go lower'}
-                      </span>
+                        </span>
+                      )}
                     </li>
                   ))}
                 </ul>
@@ -711,19 +846,49 @@ function App() {
           </section>
         )}
 
-        <footer className="warning-footer" role="alert" aria-live="polite">
-          <div className="warning-footer__icon" aria-hidden="true">!</div>
-          <div>
-            <p className="warning-footer__title">Warning</p>
-            <p className="warning-footer__text">
-              Refreshing this page will clear all current players and progress. rip
-            </p>
+        <div className="footer-row">
+          <footer className="warning-footer" role="alert" aria-live="polite">
+            <div className="warning-footer__icon" aria-hidden="true">!</div>
+            <div>
+              <p className="warning-footer__title">Warning</p>
+              <p className="warning-footer__text">
+                Refreshing this page will clear all current players and progress.
+              </p>
+            </div>
+          </footer>
+
+          <div className="restart-box" aria-label="Restart game controls">
+            <p className="restart-box__title">Restart Game</p>
+            <p className="restart-box__text">Reset the current session and start fresh.</p>
+            <button
+              type="button"
+              className="restart-box__button"
+              onClick={() => {
+                const confirmed = window.confirm('Restart the current game and wipe to start fresh?');
+                if (confirmed) {
+                  setRestartSpinning(true);
+                  if (restartSpinTimer.current) {
+                    clearTimeout(restartSpinTimer.current);
+                  }
+                  restartSpinTimer.current = setTimeout(() => {
+                    setRestartSpinning(false);
+                    restartSpinTimer.current = null;
+                  }, 1300);
+                  restartGame(true);
+                }
+              }}
+            >
+              <span
+                className={`refresh-icon ${restartSpinning ? 'refresh-icon--spin' : ''}`}
+                aria-hidden="true"
+              />
+              Reset
+            </button>
           </div>
-        </footer>
+        </div>
       </div>
     </div>
   );
 }
 
 export default App;
-
