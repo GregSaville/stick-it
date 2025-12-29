@@ -716,7 +716,7 @@ function App() {
           <div>
             <p className="warning-footer__title">Warning</p>
             <p className="warning-footer__text">
-              Refreshing this page will clear all current players and progress.
+              Refreshing this page will clear all current players and progress. rip
             </p>
           </div>
         </footer>
