@@ -1,0 +1,42 @@
+name: Deploy Frontend to Droplet
+
+on:
+  push:
+    branches:
+      - master 
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: saville-prod
+
+    steps:
+      - name: 🚀 SSH into droplet and deploy latest build
+        uses: appleboy/ssh-action@v1.0.0
+        with:
+          host: ${{ secrets.DROPLET_HOST }}
+          username: ${{ secrets.DROPLET_USER }}
+          key: ${{ secrets.DROPLET_SSH_KEY }}
+          script: |
+            echo "==> Navigating to repo..."
+            cd ~/stick-it-app/stick-it || exit 1
+
+            echo "==> Pulling latest master branch..."
+            git fetch origin master
+            git reset --hard origin/master
+
+            echo "==> Installing dependencies..."
+            npm ci --legacy-peer-deps
+
+            echo "==> Building production bundle..."
+            CI=false npm run build
+
+            echo "==> Deploying Web Assets"
+            sudo rm -rf /var/www/stick-it/*
+            sudo cp -r build/* /var/www/stick-it/
+            sudo chown -R www-data:www-data /var/www/stick-it
+
+            echo "==> Testing and reloading Nginx..."
+            sudo nginx -t && sudo systemctl reload nginx
+
+            echo "✅ Deployment complete!"
