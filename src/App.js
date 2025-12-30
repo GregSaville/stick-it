@@ -32,6 +32,9 @@ function App() {
   const [error, setError] = useState('');
   const [mode, setMode] = useState('solo'); // solo | multiplayer
   const [gameMode, setGameMode] = useState('exact'); // exact | quickfire
+  const [guessOrderMode, setGuessOrderMode] = useState('random'); // random | set
+  const [higherLowerEnabled, setHigherLowerEnabled] = useState(true);
+  const [draggingPlayerId, setDraggingPlayerId] = useState(null);
   const [removeTargetId, setRemoveTargetId] = useState(null);
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
   const [feedbackCue, setFeedbackCue] = useState(null); // higher | lower | correct
@@ -103,7 +106,7 @@ function App() {
     }
 
     const preparedPlayers = isMultiplayerMode
-      ? shufflePlayers(players).map((player) => ({
+      ? (guessOrderMode === 'random' ? shufflePlayers(players) : [...players]).map((player) => ({
           ...player,
           wins: player.wins ?? 0,
           streak: player.streak ?? 0,
@@ -145,12 +148,16 @@ function App() {
       return;
     }
 
-    const feedback =
+    let feedback =
       parsedGuess === targetNumber
         ? 'correct'
         : parsedGuess < targetNumber
           ? 'higher'
           : 'lower';
+
+    if (gameMode === 'exact' && !higherLowerEnabled && feedback !== 'correct') {
+      feedback = 'neutral';
+    }
 
     const timestamp = Date.now();
     const entry = {
@@ -209,7 +216,7 @@ function App() {
     setGuesses((prev) => [entry, ...prev]);
     setGuessValue('');
     setError('');
-    setFeedbackCue({ type: feedback, id: timestamp });
+    setFeedbackCue(feedback === 'neutral' ? null : { type: feedback, id: timestamp });
 
     if (feedback === 'correct') {
       if (mode === 'multiplayer') {
@@ -380,6 +387,9 @@ function App() {
 
   const handleGameModeChange = (nextMode) => {
     setGameMode(nextMode);
+    if (nextMode !== 'exact') {
+      setHigherLowerEnabled(true);
+    }
     setStatus('waiting');
     setWinner(null);
     setGuesses([]);
@@ -393,16 +403,69 @@ function App() {
     }
   };
 
-  const guessFontSize = (() => {
-    const valueLength = guessValue ? guessValue.replace(/\D/g, '').length : 0;
-    const maxDigits = Math.max(valueLength || 1, String(maxNumber).length);
-    const baseSize = 42;
-    const minSize = 24;
-    if (maxDigits <= 3) return baseSize;
-    const digitSpan = 7 - 3; // scales from 101 up to the 1,000,000 cap
-    const shrinkRatio = Math.min((maxDigits - 3) / digitSpan, 1);
-    return Math.round(baseSize - (baseSize - minSize) * shrinkRatio);
-  })();
+  const handleGuessOrderChange = (nextMode) => {
+    if (mode !== 'multiplayer') return;
+    setGuessOrderMode(nextMode);
+    setStatus('waiting');
+    setWinner(null);
+    setGuesses([]);
+    setGuessValue('');
+    setCurrentPlayerIndex(0);
+    setRemoveTargetId(null);
+    setControlsCollapsed(false);
+    setError('');
+  };
+
+  const reorderPlayers = (sourceId, targetId) => {
+    if (!sourceId || !targetId || sourceId === targetId) return;
+    setPlayers((prev) => {
+      const fromIndex = prev.findIndex((player) => player.id === sourceId);
+      const toIndex = prev.findIndex((player) => player.id === targetId);
+      if (fromIndex === -1 || toIndex === -1) return prev;
+      const updated = [...prev];
+      const [moved] = updated.splice(fromIndex, 1);
+      updated.splice(toIndex, 0, moved);
+
+      const currentId = prev[currentPlayerIndex]?.id;
+      if (currentId) {
+        const nextIndex = updated.findIndex((player) => player.id === currentId);
+        if (nextIndex >= 0 && nextIndex !== currentPlayerIndex) {
+          setCurrentPlayerIndex(nextIndex);
+        }
+      }
+
+      return updated;
+    });
+  };
+
+  const handlePlayerDragStart = (event, playerId) => {
+    if (!(mode === 'multiplayer' && guessOrderMode === 'set') || isLocked) return;
+    setDraggingPlayerId(playerId);
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = 'move';
+      event.dataTransfer.setData('text/plain', playerId);
+    }
+  };
+
+  const handlePlayerDragOver = (event, targetId) => {
+    if (!(mode === 'multiplayer' && guessOrderMode === 'set') || isLocked) return;
+    event.preventDefault();
+    if (!draggingPlayerId || draggingPlayerId === targetId) return;
+    reorderPlayers(draggingPlayerId, targetId);
+  };
+
+  const handlePlayerDrop = (event, targetId) => {
+    if (!(mode === 'multiplayer' && guessOrderMode === 'set') || isLocked) return;
+    event.preventDefault();
+    if (draggingPlayerId) {
+      reorderPlayers(draggingPlayerId, targetId);
+    }
+    setDraggingPlayerId(null);
+  };
+
+  const handlePlayerDragEnd = () => {
+    setDraggingPlayerId(null);
+  };
 
   const lowerBound = guesses
     .filter((guess) => guess.feedback === 'higher')
@@ -421,10 +484,24 @@ function App() {
     effectiveMax = collapsed;
   }
 
+  const guessFontSize = (() => {
+    const valueDigits = guessValue ? guessValue.replace(/\D/g, '').length : 0;
+    const rangeDigits = `${effectiveMin}-${effectiveMax}`.replace(/\D/g, '').length;
+    const maxDigits = Math.max(valueDigits || 1, rangeDigits, String(maxNumber).length);
+    const baseSize = 40;
+    const minSize = 18;
+    if (maxDigits <= 3) return baseSize;
+    const digitSpan = 9 - 3; // scale down through 9 digits
+    const shrinkRatio = Math.min((maxDigits - 3) / digitSpan, 1);
+    return Math.round(baseSize - (baseSize - minSize) * shrinkRatio);
+  })();
+
   const inRangeHint = `${effectiveMin} to ${effectiveMax}`;
   const canGuess = status === 'active' && players.length > 0;
   const showGuessFeedback = feedbackCue && (!isQuickfire || feedbackCue.type === 'correct');
   const modeLabel = gameMode === 'exact' ? 'Exact Match' : 'Quickfire Closest';
+  const statusLabel = status === 'won' ? 'Winner' : status === 'active' ? 'In-Progress' : 'Setting up';
+  const isGuessOrderDisabled = mode !== 'multiplayer';
 
   return (
     <div className="app">
@@ -441,80 +518,146 @@ function App() {
           <section
             className={`panel host-panel ${controlsCollapsed ? 'host-panel--collapsed' : ''} ${isLocked ? 'host-panel--locked' : ''}`}
           >
-            <div className="panel__title">
-              <div>
-                <p className="label">Game Setup</p>
-                <h3>Host controls</h3>
+            <div className="panel__title panel__title--host">
+              <div className="host-header">
+                <p className="label">Game Settings Tab</p>
+                <button
+                  type="button"
+                  className={`host-toggle ${controlsCollapsed ? 'host-toggle--collapsed' : 'host-toggle--open'}`}
+                  onClick={() => setControlsCollapsed((prev) => !prev)}
+                  aria-label={controlsCollapsed ? 'Expand host controls' : 'Collapse host controls'}
+                >
+                  <span />
+                  <span />
+                  <span />
+                </button>
               </div>
-              <span className={`badge badge--${status}`}>
-                {status === 'won' ? 'Winner' : status === 'active' ? 'In-Progress' : 'Setting up'}
-              </span>
-              <button
-                type="button"
-                className="host-toggle"
-                onClick={() => setControlsCollapsed((prev) => !prev)}
-                aria-label={controlsCollapsed ? 'Expand host controls' : 'Collapse host controls'}
-              >
-                <span />
-                <span />
-                <span />
-              </button>
+              <div className={`host-status status-block status-block--${status}`}>
+                <div className="status-block__inner">
+                  <div className="status-block__heading">
+                    <h3>Game Status</h3>
+                  </div>
+                  <div className="status-chip-wrapper">
+                    <span className={`status-chip status-chip--${status}`}>
+                      {statusLabel}
+                    </span>
+                    <span className="status-chip__glow" aria-hidden />
+                  </div>
+                </div>
+                {status === 'won' && <div className="status-block__halo" aria-hidden />}
+              </div>
             </div>
 
             {!controlsCollapsed && (
               <>
-                <div className="mode-switch">
-                  <button
-                    type="button"
-                    className={mode === 'solo' ? '' : 'ghost'}
-                    onClick={() => handleModeChange('solo')}
-                    disabled={isLocked}
-                  >
-                    Solo
-                  </button>
-                  <button
-                    type="button"
-                    className={mode === 'multiplayer' ? '' : 'ghost'}
-                    onClick={() => handleModeChange('multiplayer')}
-                    disabled={isLocked}
-                  >
-                    Multiplayer
-                  </button>
+                <div className="control">
+                  <label>Game Structure</label>
+                  <div className="mode-switch">
+                    <button
+                      type="button"
+                      className={mode === 'solo' ? '' : 'ghost'}
+                      onClick={() => handleModeChange('solo')}
+                      disabled={isLocked}
+                    >
+                      Solo
+                    </button>
+                    <button
+                      type="button"
+                      className={mode === 'multiplayer' ? '' : 'ghost'}
+                      onClick={() => handleModeChange('multiplayer')}
+                      disabled={isLocked}
+                    >
+                      Multiplayer
+                    </button>
+                  </div>
                 </div>
 
                 <div className="control">
                   <label htmlFor="gameMode">Game mode</label>
-                  <div className="mode-switch">
-                  <button
-                    type="button"
-                    className={`mode-btn ${gameMode === 'exact' ? 'mode-btn--active' : ''}`}
-                    onClick={() => handleGameModeChange('exact')}
-                    disabled={status === 'active'}
-                  >
-                    Exact match
-                  </button>
-                  <button
-                    type="button"
-                    className={`mode-btn ${gameMode === 'quickfire' ? 'mode-btn--active' : ''}`}
-                    onClick={() => handleGameModeChange('quickfire')}
-                    disabled={status === 'active' || mode === 'solo'}
-                  >
-                    Quickfire closest
-                  </button>
+                  <div className="mode-row">
+                    <div className="mode-switch">
+                      <button
+                        type="button"
+                        className={`mode-btn ${gameMode === 'exact' ? 'mode-btn--active' : ''}`}
+                        onClick={() => handleGameModeChange('exact')}
+                        disabled={status === 'active'}
+                      >
+                        Exact match
+                      </button>
+                      <button
+                        type="button"
+                        className={`mode-btn ${gameMode === 'quickfire' ? 'mode-btn--active' : ''}`}
+                        onClick={() => handleGameModeChange('quickfire')}
+                        disabled={status === 'active' || mode === 'solo'}
+                      >
+                        Quickfire closest
+                      </button>
+                    </div>
+                    {gameMode === 'exact' && (
+                      <div className="bonus-toggle">
+                        <label className="toggle">
+                          <input
+                            type="checkbox"
+                            checked={higherLowerEnabled}
+                            onChange={(event) => setHigherLowerEnabled(event.target.checked)}
+                            disabled={status === 'active'}
+                          />
+                          <span>Enable Higher/Lower feedback</span>
+                        </label>
+                        <small className="mode-description">
+                          When on, we tell you if a guess is higher or lower and tighten the range. Turn off for no hints.
+                        </small>
+                      </div>
+                    )}
+                  </div>
+                  {gameMode === 'exact' ? (
+                    <small className="mode-description">
+                      Exact Match: Precision Reigns. Only an exact hit wins. Guess until someone guesses the exact random number.
+                    </small>
+                  ) : (
+                    <small className="mode-description">
+                      Quickfire Closest: everyone guesses once, closest wins. No higher/lower hints.
+                    </small>
+                  )}
                 </div>
-                {gameMode === 'exact' ? (
-                  <small className="mode-description">
-                    Exact Match: the shrinking range locks in after each guess. Only an exact hit wins.
-                  </small>
-                ) : (
-                  <small className="mode-description">
-                    Quickfire Closest: everyone guesses once, closest wins. No higher/lower hints.
-                  </small>
-                )}
-              </div>
 
                 <div className="control">
-                  <label htmlFor="maxNumber">Range (1 to X)</label>
+                  <label htmlFor="guessOrderMode">Guessing order</label>
+                  <div className={`mode-switch ${isGuessOrderDisabled ? 'mode-switch--disabled' : ''}`}>
+                    <button
+                      type="button"
+                      className={`mode-btn ${guessOrderMode === 'random' ? 'mode-btn--active' : ''}`}
+                      onClick={() => handleGuessOrderChange('random')}
+                      disabled={isLocked || isGuessOrderDisabled}
+                    >
+                      Random
+                    </button>
+                    <button
+                      type="button"
+                      className={`mode-btn ${guessOrderMode === 'set' ? 'mode-btn--active' : ''}`}
+                      onClick={() => handleGuessOrderChange('set')}
+                      disabled={isLocked || isGuessOrderDisabled}
+                    >
+                      Set
+                    </button>
+                  </div>
+                  {isGuessOrderDisabled ? (
+                    <small className="mode-description">
+                      Switch to Multiplayer to choose the guessing order.
+                    </small>
+                  ) : guessOrderMode === 'random' ? (
+                    <small className="mode-description">
+                      Random: we shuffle the guessing order at the start of each round.
+                    </small>
+                  ) : (
+                    <small className="mode-description">
+                      Set: Tap and Hold to drag players below to lock in a custom guessing order. We follow your order Top to Bottom each round.
+                    </small>
+                  )}
+                </div>
+
+                <div className="control">
+                  <label htmlFor="maxNumber">Number Range (1 to X)</label>
                   <div className="range-row">
                     <button
                       type="button"
@@ -591,7 +734,7 @@ function App() {
                 </p>
               )}
 
-              <div className="player-list">
+              <div className={`player-list ${mode === 'multiplayer' && guessOrderMode === 'set' ? 'player-list--set' : ''}`}>
                 {players.length === 0 ? (
                   <p className="muted">No players yet. Add friends to start.</p>
                 ) : (
@@ -603,13 +746,17 @@ function App() {
                     const hasHotStreak = playerStreak >= 3;
                     const flameLevel = Math.max(0, Math.min(playerStreak, 8));
                     const flameScale = 1 + flameLevel * 0.14;
+                    const canDragSet = mode === 'multiplayer' && guessOrderMode === 'set' && !isLocked;
+                    const isDragging = draggingPlayerId === player.id;
 
                     return (
                       <div
                         key={player.id}
                         className={`chip ${isCurrent ? 'chip--active' : ''} ${
                           isFlipped ? 'chip--flipped' : ''
-                        } ${hasHotStreak ? 'chip--hot' : ''}`}
+                        } ${hasHotStreak ? 'chip--hot' : ''} ${canDragSet ? 'chip--draggable' : ''} ${
+                          isDragging ? 'chip--dragging' : ''
+                        }`}
                         data-player-id={player.id}
                         ref={(node) => {
                           if (node) {
@@ -618,6 +765,11 @@ function App() {
                             chipRefs.current.delete(player.id);
                           }
                         }}
+                        draggable={canDragSet}
+                        onDragStart={(event) => handlePlayerDragStart(event, player.id)}
+                        onDragOver={(event) => handlePlayerDragOver(event, player.id)}
+                        onDrop={(event) => handlePlayerDrop(event, player.id)}
+                        onDragEnd={handlePlayerDragEnd}
                         onClick={() => setRemoveTargetId(isFlipped ? null : player.id)}
                       >
                         <div className="chip__inner">
@@ -736,7 +888,7 @@ function App() {
                       value={guessValue}
                       onChange={(event) => setGuessValue(event.target.value)}
                       disabled={!canGuess || !!winner}
-                      placeholder={`Enter ${inRangeHint}`}
+                      placeholder={`Enter ${effectiveMin}-${effectiveMax}`}
                       style={{ fontSize: `${guessFontSize}px` }}
                       autoComplete="off"
                     />
@@ -822,12 +974,14 @@ function App() {
                           {winner?.id === guess.playerId ? 'Closest' : 'Guess'}
                         </span>
                       ) : (
-                        <span className={`pill pill--${guess.feedback}`}>
+                        <span className={`pill pill--${guess.feedback === 'neutral' ? 'incorrect' : guess.feedback}`}>
                           {guess.feedback === 'correct'
                             ? 'Correct!'
-                            : guess.feedback === 'higher'
-                              ? 'Go higher'
-                              : 'Go lower'}
+                            : guess.feedback === 'neutral'
+                              ? 'Incorrect'
+                              : guess.feedback === 'higher'
+                                ? 'Go higher'
+                                : 'Go lower'}
                         </span>
                       )}
                     </li>
