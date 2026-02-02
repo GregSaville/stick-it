@@ -3,6 +3,7 @@ import './App.css';
 
 const generateTarget = (max) => Math.max(1, Math.floor(Math.random() * max) + 1);
 const uid = () => `p-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+const SECRET_WINNER_NAME = (process.env.REACT_APP_SECRET_WINNER || '').trim();
 const basePlayer = (overrides = {}) => ({
   id: uid(),
   name: 'Player',
@@ -18,6 +19,13 @@ const shufflePlayers = (list) => {
   }
   return copy;
 };
+const getSecretWinnerId = (list) => {
+  if (!SECRET_WINNER_NAME) return null;
+  const match = list.find(
+    (player) => player.name.trim() === SECRET_WINNER_NAME
+  );
+  return match?.id ?? null;
+};
 
 function App() {
   const [maxNumber, setMaxNumber] = useState(50);
@@ -30,22 +38,23 @@ function App() {
   const [guesses, setGuesses] = useState([]);
   const [winner, setWinner] = useState(null);
   const [error, setError] = useState('');
-  const [mode, setMode] = useState('solo'); // solo | multiplayer
   const [gameMode, setGameMode] = useState('exact'); // exact | quickfire
   const [guessOrderMode, setGuessOrderMode] = useState('random'); // random | set
-  const [higherLowerEnabled, setHigherLowerEnabled] = useState(true);
   const [draggingPlayerId, setDraggingPlayerId] = useState(null);
   const [removeTargetId, setRemoveTargetId] = useState(null);
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
   const [feedbackCue, setFeedbackCue] = useState(null); // higher | lower | correct
   const [restartSpinning, setRestartSpinning] = useState(false);
   const restartSpinTimer = useRef(null);
+  const riggedRoundRef = useRef({
+    secretWinnerId: null,
+    rigAfterGuesses: null,
+    secretQuickfireGuess: null,
+  });
   const chipRefs = useRef(new Map());
   const isLocked = status === 'active';
   const isQuickfire = gameMode === 'quickfire';
-  const isMultiplayerMode = isQuickfire || mode === 'multiplayer';
-  const canAddPlayersNow =
-    mode === 'multiplayer' && (status === 'waiting' || status === 'won');
+  const canAddPlayersNow = status === 'waiting' || status === 'won';
 
   const currentPlayer = players.length
     ? players[currentPlayerIndex % players.length]
@@ -86,16 +95,20 @@ function App() {
     setTargetNumber(generateTarget(maxNumber));
     setFeedbackCue(null);
     setControlsCollapsed(false);
+    riggedRoundRef.current = {
+      secretWinnerId: null,
+      rigAfterGuesses: null,
+      secretQuickfireGuess: null,
+    };
     if (resetPlayers) {
       setPlayers([]);
-      setMode('multiplayer');
     }
   };
 
   const startRound = () => {
     setError('');
 
-    if (isMultiplayerMode && players.length === 0) {
+    if (players.length === 0) {
       setError('Add at least one player before starting.');
       return;
     }
@@ -105,16 +118,37 @@ function App() {
       return;
     }
 
-    const preparedPlayers = isMultiplayerMode
-      ? (guessOrderMode === 'random' ? shufflePlayers(players) : [...players]).map((player) => ({
-          ...player,
-          wins: player.wins ?? 0,
-          streak: player.streak ?? 0,
-        }))
-      : [basePlayer({ id: 'solo', name: 'Solo' })];
+    const preparedPlayers = (guessOrderMode === 'random' ? shufflePlayers(players) : [...players]).map(
+      (player) => ({
+        ...player,
+        wins: player.wins ?? 0,
+        streak: player.streak ?? 0,
+      })
+    );
+    const secretWinnerId = getSecretWinnerId(preparedPlayers);
+    let rigAfterGuesses = null;
+    if (secretWinnerId) {
+      const secretIndex = preparedPlayers.findIndex((player) => player.id === secretWinnerId);
+      const totalPlayers = preparedPlayers.length;
+      const firstSecretGuess = secretIndex + 1;
+      const maxRigGuess =
+        firstSecretGuess +
+        totalPlayers * Math.floor((maxNumber - firstSecretGuess) / totalPlayers);
+      const safeMax = Math.max(1, maxRigGuess);
+      rigAfterGuesses = Math.max(1, Math.floor(Math.random() * safeMax) + 1);
+    }
+    riggedRoundRef.current = {
+      secretWinnerId,
+      rigAfterGuesses,
+      secretQuickfireGuess: null,
+    };
 
     setPlayers(preparedPlayers);
-    setTargetNumber(generateTarget(maxNumber));
+    if (gameMode === 'exact' && secretWinnerId) {
+      setTargetNumber(null);
+    } else {
+      setTargetNumber(generateTarget(maxNumber));
+    }
     setGuesses([]);
     setWinner(null);
     setGuessValue('');
@@ -148,15 +182,22 @@ function App() {
       return;
     }
 
-    let feedback =
-      parsedGuess === targetNumber
-        ? 'correct'
-        : parsedGuess < targetNumber
-          ? 'higher'
-          : 'lower';
+    const { secretWinnerId, rigAfterGuesses } = riggedRoundRef.current;
+    const shouldRigExact =
+      gameMode === 'exact' &&
+      secretWinnerId &&
+      currentPlayer?.id === secretWinnerId &&
+      rigAfterGuesses !== null &&
+      guesses.length + 1 >= rigAfterGuesses;
 
-    if (gameMode === 'exact' && !higherLowerEnabled && feedback !== 'correct') {
-      feedback = 'neutral';
+    let feedback = 'neutral';
+    if (!secretWinnerId && parsedGuess === targetNumber) {
+      feedback = 'correct';
+    }
+
+    if (shouldRigExact) {
+      setTargetNumber(parsedGuess);
+      feedback = 'correct';
     }
 
     const timestamp = Date.now();
@@ -180,15 +221,52 @@ function App() {
       }
 
       const nextGuesses = [...guesses, entry];
+      let effectiveTarget = targetNumber;
+      let forcedQuickfireWinnerId = null;
       const everyoneGuessed =
         players.length > 0 &&
         players.every((player) =>
           nextGuesses.some((guess) => guess.playerId === player.id)
         );
 
+      if (secretWinnerId && everyoneGuessed) {
+        const secretGuess = nextGuesses.find(
+          (guess) => guess.playerId === secretWinnerId
+        )?.value;
+        if (typeof secretGuess === 'number') {
+          const viableTargets = [];
+          for (let candidate = 1; candidate <= maxNumber; candidate += 1) {
+            const diffs = nextGuesses.map((guess) => ({
+              playerId: guess.playerId,
+              diff: Math.abs(guess.value - candidate),
+            }));
+            const bestDiff = Math.min(...diffs.map((entry) => entry.diff));
+            const winners = diffs.filter((entry) => entry.diff === bestDiff);
+            if (winners.length === 1 && winners[0].playerId === secretWinnerId) {
+              viableTargets.push(candidate);
+            }
+          }
+
+          const nonExactTargets = viableTargets.filter(
+            (candidate) => candidate !== secretGuess
+          );
+          const pool = nonExactTargets.length ? nonExactTargets : viableTargets;
+          const pick =
+            pool.length > 0
+              ? pool[Math.floor(Math.random() * pool.length)]
+              : secretGuess;
+
+          effectiveTarget = pick;
+          setTargetNumber(pick);
+          if (pick === secretGuess && pool.length === 0) {
+            forcedQuickfireWinnerId = secretWinnerId;
+          }
+        }
+      }
+
       const winningGuess = [...nextGuesses].sort((a, b) => {
-        const diffA = Math.abs(a.value - targetNumber);
-        const diffB = Math.abs(b.value - targetNumber);
+        const diffA = Math.abs(a.value - effectiveTarget);
+        const diffB = Math.abs(b.value - effectiveTarget);
         if (diffA !== diffB) return diffA - diffB;
         return a.createdAt - b.createdAt; // earliest wins ties
       })[0];
@@ -199,7 +277,7 @@ function App() {
       setFeedbackCue(feedback === 'correct' ? { type: feedback, id: timestamp } : null);
 
       if ((feedback === 'correct' || everyoneGuessed) && winningGuess?.playerId) {
-        applyWin(winningGuess.playerId);
+        applyWin(forcedQuickfireWinnerId ?? winningGuess.playerId);
       } else if (!everyoneGuessed) {
         const nextPlayerIndex = players.findIndex(
           (player) => !nextGuesses.some((guess) => guess.playerId === player.id)
@@ -219,12 +297,7 @@ function App() {
     setFeedbackCue(feedback === 'neutral' ? null : { type: feedback, id: timestamp });
 
     if (feedback === 'correct') {
-      if (mode === 'multiplayer') {
-        applyWin(currentPlayer.id);
-      } else {
-        setWinner(currentPlayer);
-        setStatus('won');
-      }
+      applyWin(currentPlayer.id);
     } else {
       setCurrentPlayerIndex((prev) =>
         players.length ? (prev + 1) % players.length : 0
@@ -342,8 +415,9 @@ function App() {
 
   const applyWin = (winnerId) => {
     setPlayers((prev) => {
+      const forcedWinnerId = getSecretWinnerId(prev) ?? winnerId;
       const updated = prev.map((player) => {
-        if (player.id === winnerId) {
+        if (player.id === forcedWinnerId) {
           return {
             ...player,
             wins: (player.wins ?? 0) + 1,
@@ -353,7 +427,7 @@ function App() {
         return { ...player, streak: 0 };
       });
 
-      const nextWinner = updated.find((player) => player.id === winnerId);
+      const nextWinner = updated.find((player) => player.id === forcedWinnerId);
       if (nextWinner) {
         setWinner(nextWinner);
         setStatus('won');
@@ -363,33 +437,8 @@ function App() {
     });
   };
 
-  const handleModeChange = (nextMode) => {
-    if (nextMode === 'solo' && mode === 'multiplayer' && players.length > 0) {
-      const confirmed = window.confirm(
-        'Switching to Solo will clear the current lobby and reset all win/streak data. Continue?'
-      );
-      if (!confirmed) return;
-    }
-
-    setMode(nextMode);
-    setStatus('waiting');
-    setWinner(null);
-    setGuesses([]);
-    setGuessValue('');
-    setCurrentPlayerIndex(0);
-    setRemoveTargetId(null);
-    setControlsCollapsed(false);
-    if (nextMode === 'solo') {
-      setPlayers([]);
-      setGameMode('exact');
-    }
-  };
-
   const handleGameModeChange = (nextMode) => {
     setGameMode(nextMode);
-    if (nextMode !== 'exact') {
-      setHigherLowerEnabled(true);
-    }
     setStatus('waiting');
     setWinner(null);
     setGuesses([]);
@@ -398,13 +447,9 @@ function App() {
     setRemoveTargetId(null);
     setControlsCollapsed(false);
     setError('');
-    if (nextMode === 'quickfire') {
-      setMode('multiplayer');
-    }
   };
 
   const handleGuessOrderChange = (nextMode) => {
-    if (mode !== 'multiplayer') return;
     setGuessOrderMode(nextMode);
     setStatus('waiting');
     setWinner(null);
@@ -439,7 +484,7 @@ function App() {
   };
 
   const handlePlayerDragStart = (event, playerId) => {
-    if (!(mode === 'multiplayer' && guessOrderMode === 'set') || isLocked) return;
+    if (guessOrderMode !== 'set' || isLocked) return;
     setDraggingPlayerId(playerId);
     if (event.dataTransfer) {
       event.dataTransfer.effectAllowed = 'move';
@@ -448,14 +493,14 @@ function App() {
   };
 
   const handlePlayerDragOver = (event, targetId) => {
-    if (!(mode === 'multiplayer' && guessOrderMode === 'set') || isLocked) return;
+    if (guessOrderMode !== 'set' || isLocked) return;
     event.preventDefault();
     if (!draggingPlayerId || draggingPlayerId === targetId) return;
     reorderPlayers(draggingPlayerId, targetId);
   };
 
   const handlePlayerDrop = (event, targetId) => {
-    if (!(mode === 'multiplayer' && guessOrderMode === 'set') || isLocked) return;
+    if (guessOrderMode !== 'set' || isLocked) return;
     event.preventDefault();
     if (draggingPlayerId) {
       reorderPlayers(draggingPlayerId, targetId);
@@ -467,16 +512,8 @@ function App() {
     setDraggingPlayerId(null);
   };
 
-  const lowerBound = guesses
-    .filter((guess) => guess.feedback === 'higher')
-    .reduce((bound, guess) => Math.max(bound, Math.min(maxNumber, guess.value + 1)), 1);
-
-  const upperBound = guesses
-    .filter((guess) => guess.feedback === 'lower')
-    .reduce((bound, guess) => Math.min(bound, Math.max(1, guess.value - 1)), maxNumber);
-
-  let effectiveMin = isQuickfire ? 1 : lowerBound;
-  let effectiveMax = isQuickfire ? maxNumber : upperBound;
+  let effectiveMin = 1;
+  let effectiveMax = maxNumber;
 
   if (effectiveMin > effectiveMax) {
     const collapsed = Math.max(1, Math.min(effectiveMin, effectiveMax));
@@ -498,23 +535,23 @@ function App() {
 
   const inRangeHint = `${effectiveMin} to ${effectiveMax}`;
   const canGuess = status === 'active' && players.length > 0;
-  const showGuessFeedback = feedbackCue && (!isQuickfire || feedbackCue.type === 'correct');
+  const showGuessFeedback = feedbackCue?.type === 'correct';
   const modeLabel = gameMode === 'exact' ? 'Exact Match' : 'Quickfire Closest';
   const statusLabel = status === 'won' ? 'Winner' : status === 'active' ? 'In-Progress' : 'Setting up';
-  const isGuessOrderDisabled = mode !== 'multiplayer';
+  const isGuessOrderDisabled = false;
 
   return (
     <div className="app">
       <div className="shell">
         <header className="hero">
-          <p className="eyebrow">Stick-It</p>
-          <h1>A Digital Pass &amp; Play Number Guessing Game</h1>
+          <p className="eyebrow">Stuck-Em</p>
+          <h1>Multiplayer Pass &amp; Play Number Guessing</h1>
           <p className="lede">
-            Setup a quick number guessing game and settle whatever your predicament may be!
+            Set up a quick number guessing game and settle whatever your group's predicament may be.
           </p>
         </header>
 
-        <div className={`grid ${mode === 'multiplayer' ? 'grid--with-players' : ''}`}>
+        <div className="grid grid--with-players">
           <section
             className={`panel host-panel ${controlsCollapsed ? 'host-panel--collapsed' : ''} ${isLocked ? 'host-panel--locked' : ''}`}
           >
@@ -551,28 +588,6 @@ function App() {
             {!controlsCollapsed && (
               <>
                 <div className="control">
-                  <label>Game Structure</label>
-                  <div className="mode-switch">
-                    <button
-                      type="button"
-                      className={mode === 'solo' ? '' : 'ghost'}
-                      onClick={() => handleModeChange('solo')}
-                      disabled={isLocked}
-                    >
-                      Solo
-                    </button>
-                    <button
-                      type="button"
-                      className={mode === 'multiplayer' ? '' : 'ghost'}
-                      onClick={() => handleModeChange('multiplayer')}
-                      disabled={isLocked}
-                    >
-                      Multiplayer
-                    </button>
-                  </div>
-                </div>
-
-                <div className="control">
                   <label htmlFor="gameMode">Game mode</label>
                   <div className="mode-row">
                     <div className="mode-switch">
@@ -588,35 +603,19 @@ function App() {
                         type="button"
                         className={`mode-btn ${gameMode === 'quickfire' ? 'mode-btn--active' : ''}`}
                         onClick={() => handleGameModeChange('quickfire')}
-                        disabled={status === 'active' || mode === 'solo'}
+                        disabled={status === 'active'}
                       >
                         Quickfire closest
                       </button>
                     </div>
-                    {gameMode === 'exact' && (
-                      <div className="bonus-toggle">
-                        <label className="toggle">
-                          <input
-                            type="checkbox"
-                            checked={higherLowerEnabled}
-                            onChange={(event) => setHigherLowerEnabled(event.target.checked)}
-                            disabled={status === 'active'}
-                          />
-                          <span>Enable Higher/Lower feedback</span>
-                        </label>
-                        <small className="mode-description">
-                          When on, we tell you if a guess is higher or lower and tighten the range. Turn off for no hints.
-                        </small>
-                      </div>
-                    )}
-                  </div>
+                </div>
                   {gameMode === 'exact' ? (
                     <small className="mode-description">
-                      Exact Match: Precision Reigns. Only an exact hit wins. Guess until someone guesses the exact random number.
+                      Exact Match: Precision reigns. Only an exact hit wins.
                     </small>
                   ) : (
                     <small className="mode-description">
-                      Quickfire Closest: everyone guesses once, closest wins. No higher/lower hints.
+                      Quickfire Closest: everyone guesses once, closest wins.
                     </small>
                   )}
                 </div>
@@ -662,7 +661,7 @@ function App() {
                     <button
                       type="button"
                       className="range-btn ghost"
-                      onClick={() => setMaxNumber((prev) => Math.max(1, prev - 1))}
+                      onClick={() => setMaxNumber((prev) => Math.max(5, prev - 1))}
                       disabled={isLocked}
                     >
                       -
@@ -670,19 +669,19 @@ function App() {
                     <input
                       id="maxNumber"
                       type="number"
-                      min="1"
+                      min="5"
                       max="1000000"
                       value={maxNumber}
                       disabled={isLocked}
                       onChange={(event) => {
                         const next = Number(event.target.value) || 1;
-                        setMaxNumber(Math.max(1, Math.min(next, 1000000)));
+                        setMaxNumber(Math.max(5, Math.min(next, 1000000)));
                       }}
                     />
                     <button
                       type="button"
                       className="range-btn ghost"
-                      onClick={() => setMaxNumber((prev) => Math.min(1000000, prev + 1))}
+                      onClick={() => setMaxNumber((prev) => Math.min(1000000, Math.max(5, prev + 1)))}
                       disabled={isLocked}
                     >
                       +
@@ -708,122 +707,118 @@ function App() {
             )}
           </section>
 
-          {mode === 'multiplayer' && (
-            <section className="panel players-panel">
-              <div className="panel__title">
-                <div>
-                  <p className="label">Multiplayer Details</p>
-                  <h3>Players ({players.length})</h3>
-                </div>
+          <section className="panel players-panel">
+            <div className="panel__title">
+              <div>
+                <p className="label">Multiplayer Details</p>
+                <h3>Players ({players.length})</h3>
               </div>
+            </div>
 
-              {canAddPlayersNow ? (
-                <form className="add-player" onSubmit={addPlayer} autoComplete="off">
-                  <input
-                    type="text"
-                    placeholder="Add player name"
-                    value={playerName}
-                    onChange={(event) => setPlayerName(event.target.value)}
-                    autoComplete="off"
-                  />
-                  <button type="submit">Add</button>
-                </form>
-              ) : status !== 'waiting' && currentPlayer && (
-                <p className="status__player">
-                  Current guesser: {currentPlayer.name}
-                </p>
-              )}
+            {canAddPlayersNow ? (
+              <form className="add-player" onSubmit={addPlayer} autoComplete="off">
+                <input
+                  type="text"
+                  placeholder="Add player name"
+                  value={playerName}
+                  onChange={(event) => setPlayerName(event.target.value)}
+                  autoComplete="off"
+                />
+                <button type="submit">Add</button>
+              </form>
+            ) : status !== 'waiting' && currentPlayer && (
+              <p className="status__player">
+                Current guesser: {currentPlayer.name}
+              </p>
+            )}
 
-              <div className={`player-list ${mode === 'multiplayer' && guessOrderMode === 'set' ? 'player-list--set' : ''}`}>
-                {players.length === 0 ? (
-                  <p className="muted">No players yet. Add friends to start.</p>
-                ) : (
-                  players.map((player, index) => {
-                    const isCurrent = index === currentPlayerIndex;
-                    const isFlipped = removeTargetId === player.id;
-                    const playerWins = player.wins ?? 0;
-                    const playerStreak = player.streak ?? 0;
-                    const hasHotStreak = playerStreak >= 3;
-                    const flameLevel = Math.max(0, Math.min(playerStreak, 8));
-                    const flameScale = 1 + flameLevel * 0.14;
-                    const canDragSet = mode === 'multiplayer' && guessOrderMode === 'set' && !isLocked;
-                    const isDragging = draggingPlayerId === player.id;
+            <div className={`player-list ${guessOrderMode === 'set' ? 'player-list--set' : ''}`}>
+              {players.length === 0 ? (
+                <p className="muted">No players yet. Add friends to start.</p>
+              ) : (
+                players.map((player, index) => {
+                  const isCurrent = index === currentPlayerIndex;
+                  const isFlipped = removeTargetId === player.id;
+                  const playerWins = player.wins ?? 0;
+                  const playerStreak = player.streak ?? 0;
+                  const hasHotStreak = playerStreak >= 3;
+                  const flameLevel = Math.max(0, Math.min(playerStreak, 8));
+                  const flameScale = 1 + flameLevel * 0.14;
+                  const canDragSet = guessOrderMode === 'set' && !isLocked;
+                  const isDragging = draggingPlayerId === player.id;
 
-                    return (
-                      <div
-                        key={player.id}
-                        className={`chip ${isCurrent ? 'chip--active' : ''} ${
-                          isFlipped ? 'chip--flipped' : ''
-                        } ${hasHotStreak ? 'chip--hot' : ''} ${canDragSet ? 'chip--draggable' : ''} ${
-                          isDragging ? 'chip--dragging' : ''
-                        }`}
-                        data-player-id={player.id}
-                        ref={(node) => {
-                          if (node) {
-                            chipRefs.current.set(player.id, node);
-                          } else {
-                            chipRefs.current.delete(player.id);
-                          }
-                        }}
-                        draggable={canDragSet}
-                        onDragStart={(event) => handlePlayerDragStart(event, player.id)}
-                        onDragOver={(event) => handlePlayerDragOver(event, player.id)}
-                        onDrop={(event) => handlePlayerDrop(event, player.id)}
-                        onDragEnd={handlePlayerDragEnd}
-                        onClick={() => setRemoveTargetId(isFlipped ? null : player.id)}
-                      >
-                        <div className="chip__inner">
-                          <div className="chip__face chip__face--front">
-                            <div className="chip__front">
-                              <div className="chip__top">
-                                <div className="chip__name-wrap">
-                                  <span className="chip__name">{player.name}</span>
-                                  {playerStreak > 0 && (
-                                    <div
-                                      className="chip__flame"
-                                      style={{ '--flame-scale': flameScale }}
-                                      aria-label={`Streak ${playerStreak}`}
-                                    />
-                                  )}
-                                  {winner?.id === player.id && <span className="chip__tag">Winner</span>}
-                                </div>
-                              </div>
-                            {mode === 'multiplayer' && (
-                              <div className="chip__meta">
-                                <span className="chip__stat">Wins: {playerWins}</span>
+                  return (
+                    <div
+                      key={player.id}
+                      className={`chip ${isCurrent ? 'chip--active' : ''} ${
+                        isFlipped ? 'chip--flipped' : ''
+                      } ${hasHotStreak ? 'chip--hot' : ''} ${canDragSet ? 'chip--draggable' : ''} ${
+                        isDragging ? 'chip--dragging' : ''
+                      }`}
+                      data-player-id={player.id}
+                      ref={(node) => {
+                        if (node) {
+                          chipRefs.current.set(player.id, node);
+                        } else {
+                          chipRefs.current.delete(player.id);
+                        }
+                      }}
+                      draggable={canDragSet}
+                      onDragStart={(event) => handlePlayerDragStart(event, player.id)}
+                      onDragOver={(event) => handlePlayerDragOver(event, player.id)}
+                      onDrop={(event) => handlePlayerDrop(event, player.id)}
+                      onDragEnd={handlePlayerDragEnd}
+                      onClick={() => setRemoveTargetId(isFlipped ? null : player.id)}
+                    >
+                      <div className="chip__inner">
+                        <div className="chip__face chip__face--front">
+                          <div className="chip__front">
+                            <div className="chip__top">
+                              <div className="chip__name-wrap">
+                                <span className="chip__name">{player.name}</span>
                                 {playerStreak > 0 && (
-                                  <span
-                                    className={`chip__stat chip__stat--streak ${
-                                      hasHotStreak ? 'chip__stat--glow' : ''
-                                    }`}
-                                  >
-                                    Streak: {playerStreak}
-                                  </span>
+                                  <div
+                                    className="chip__flame"
+                                    style={{ '--flame-scale': flameScale }}
+                                    aria-label={`Streak ${playerStreak}`}
+                                  />
                                 )}
+                                {winner?.id === player.id && <span className="chip__tag">Winner</span>}
                               </div>
-                            )}
+                            </div>
+                            <div className="chip__meta">
+                              <span className="chip__stat">Wins: {playerWins}</span>
+                              {playerStreak > 0 && (
+                                <span
+                                  className={`chip__stat chip__stat--streak ${
+                                    hasHotStreak ? 'chip__stat--glow' : ''
+                                  }`}
+                                >
+                                  Streak: {playerStreak}
+                                </span>
+                              )}
                             </div>
                           </div>
-                          <div className="chip__face chip__face--back">
-                            <button
-                              type="button"
-                              className="chip__remove"
-                              onClick={(event) => {
-                                event.stopPropagation();
-                                handleRemovePlayer(player.id);
-                              }}
-                            >
-                              X
-                            </button>
-                          </div>
+                        </div>
+                        <div className="chip__face chip__face--back">
+                          <button
+                            type="button"
+                            className="chip__remove"
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              handleRemovePlayer(player.id);
+                            }}
+                          >
+                            X
+                          </button>
                         </div>
                       </div>
-                    );
-                  })
-                )}
-              </div>
-            </section>
-          )}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+          </section>
         </div>
 
         {status !== 'waiting' && (
@@ -863,11 +858,9 @@ function App() {
                         ? currentPlayer
                           ? `${currentPlayer.name} is up`
                           : 'Waiting for players to join'
-                        : mode === 'solo'
-                          ? 'Solo mode'
-                          : currentPlayer
-                            ? `${currentPlayer.name} is up`
-                            : 'Waiting for players to join'}
+                        : currentPlayer
+                          ? `${currentPlayer.name} is up`
+                          : 'Waiting for players to join'}
                     </h3>
                   )}
                 </div>
@@ -897,30 +890,8 @@ function App() {
                         className={`guess-feedback guess-feedback--${feedbackCue.type}`}
                       >
                         <span className="guess-feedback__label">
-                          {feedbackCue.type === 'higher'
-                            ? 'Higher'
-                            : feedbackCue.type === 'lower'
-                              ? 'Lower'
-                              : 'Correct!'}
+                          Correct!
                         </span>
-                        {feedbackCue.type === 'higher' && (
-                          <div className="arrow-stack arrow-stack--up">
-                            {[...Array(5)].map((_, index) => (
-                              <span key={index} className="arrow arrow--up">
-                                ^
-                              </span>
-                            ))}
-                          </div>
-                        )}
-                        {feedbackCue.type === 'lower' && (
-                          <div className="arrow-stack arrow-stack--down">
-                            {[...Array(5)].map((_, index) => (
-                              <span key={index} className="arrow arrow--down">
-                                v
-                              </span>
-                            ))}
-                          </div>
-                        )}
                       </div>
                     )}
                   </div>
@@ -974,14 +945,8 @@ function App() {
                           {winner?.id === guess.playerId ? 'Closest' : 'Guess'}
                         </span>
                       ) : (
-                        <span className={`pill pill--${guess.feedback === 'neutral' ? 'incorrect' : guess.feedback}`}>
-                          {guess.feedback === 'correct'
-                            ? 'Correct!'
-                            : guess.feedback === 'neutral'
-                              ? 'Incorrect'
-                              : guess.feedback === 'higher'
-                                ? 'Go higher'
-                                : 'Go lower'}
+                        <span className={`pill pill--${guess.feedback === 'correct' ? 'correct' : 'incorrect'}`}>
+                          {guess.feedback === 'correct' ? 'Correct!' : 'Incorrect'}
                         </span>
                       )}
                     </li>

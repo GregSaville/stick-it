@@ -1,22 +1,22 @@
 @import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;600&family=Sora:wght@500;700&display=swap');
 
 :root {
-  --bg: #0d101b;
-  --card: #111525;
-  --card-2: #121a32;
-  --stroke: #1f2843;
-  --text: #e7ecff;
-  --muted: #9aa5c0;
-  --accent: #7c6bff;
-  --accent-2: #4de1c1;
+  --bg: #1a0b08;
+  --card: #25110c;
+  --card-2: #2d140e;
+  --stroke: #3f1a12;
+  --text: #fff1e6;
+  --muted: #f1b59b;
+  --accent: #ff6b3d;
+  --accent-2: #ffb55a;
   --danger: #ff7b7b;
   --shadow: 0 20px 70px rgba(0, 0, 0, 0.35);
 }
 
 .app {
   min-height: 100vh;
-  background: radial-gradient(circle at 20% 20%, #141d33, transparent 25%),
-    radial-gradient(circle at 80% 0%, #1b2542, transparent 30%),
+  background: radial-gradient(circle at 20% 20%, #3a140f, transparent 25%),
+    radial-gradient(circle at 80% 0%, #4a1b12, transparent 30%),
     var(--bg);
   color: var(--text);
   display: flex;
@@ -32,8 +32,8 @@
 }
 
 .hero {
-  background: linear-gradient(135deg, rgba(124, 107, 255, 0.14), rgba(77, 225, 193, 0.12));
-  border: 1px solid rgba(124, 107, 255, 0.3);
+  background: linear-gradient(135deg, rgba(255, 107, 61, 0.18), rgba(255, 181, 90, 0.14));
+  border: 1px solid rgba(255, 107, 61, 0.35);
   border-radius: 22px;
   padding: 24px 22px;
   box-shadow: var(--shadow);
@@ -51,6 +51,22 @@
   color: var(--muted);
   max-width: 720px;
   line-height: 1.6;
+}
+
+.hero .site-url {
+  margin: 14px 0 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  border-radius: 999px;
+  background: rgba(255, 181, 90, 0.16);
+  border: 1px solid rgba(255, 107, 61, 0.35);
+  color: #ffd9c2;
+  font-size: 13px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  width: fit-content;
 }
 
 .eyebrow {

@@ -1,6 +1,6 @@
 {
-  "short_name": "Stick-It",
-  "name": "Stick-It | Guessing Game",
+  "short_name": "Stuck-Em",
+  "name": "Stuck-Em | Multiplayer Guessing Game",
   "icons": [
     {
       "src": "favicon.png",
@@ -8,18 +8,19 @@
       "type": "image/png"
     },
     {
-      "src": "stick-it-icon-192.png",
+      "src": "stuck-em-icon-192.png",
       "type": "image/png",
       "sizes": "192x192"
     },
     {
-      "src": "stick-it-icon-512.png",
+      "src": "stuck-em-icon-512.png",
       "type": "image/png",
       "sizes": "512x512"
     }
   ],
-  "start_url": ".",
+  "start_url": "/stuck-em/",
+  "scope": "/stuck-em/",
   "display": "standalone",
-  "theme_color": "#0d101b",
-  "background_color": "#0d101b"
+  "theme_color": "#1a0b08",
+  "background_color": "#1a0b08"
 }
