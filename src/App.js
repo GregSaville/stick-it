@@ -2,8 +2,11 @@ import { useEffect, useRef, useState } from 'react';
 import './App.css';
 
 const generateTarget = (max) => Math.max(1, Math.floor(Math.random() * max) + 1);
+const generateTargetInRange = (min, max) =>
+  Math.max(min, Math.floor(Math.random() * (max - min + 1)) + min);
 const uid = () => `p-${Date.now()}-${Math.floor(Math.random() * 10000)}`;
 const SECRET_WINNER_NAME = (process.env.REACT_APP_SECRET_WINNER || '').trim();
+const RIG_ROUNDS_BEFORE_WIN = 2;
 const basePlayer = (overrides = {}) => ({
   id: uid(),
   name: 'Player',
@@ -45,11 +48,14 @@ function App() {
   const [controlsCollapsed, setControlsCollapsed] = useState(false);
   const [feedbackCue, setFeedbackCue] = useState(null); // higher | lower | correct
   const [restartSpinning, setRestartSpinning] = useState(false);
+  const [rangeMin, setRangeMin] = useState(1);
+  const [rangeMax, setRangeMax] = useState(50);
   const restartSpinTimer = useRef(null);
   const riggedRoundRef = useRef({
     secretWinnerId: null,
     rigAfterGuesses: null,
     secretQuickfireGuess: null,
+    riggedTarget: null,
   });
   const chipRefs = useRef(new Map());
   const isLocked = status === 'active';
@@ -95,10 +101,13 @@ function App() {
     setTargetNumber(generateTarget(maxNumber));
     setFeedbackCue(null);
     setControlsCollapsed(false);
+    setRangeMin(1);
+    setRangeMax(maxNumber);
     riggedRoundRef.current = {
       secretWinnerId: null,
       rigAfterGuesses: null,
       secretQuickfireGuess: null,
+      riggedTarget: null,
     };
     if (resetPlayers) {
       setPlayers([]);
@@ -127,25 +136,23 @@ function App() {
     );
     const secretWinnerId = getSecretWinnerId(preparedPlayers);
     let rigAfterGuesses = null;
-    if (secretWinnerId) {
+    let riggedTarget = null;
+    if (secretWinnerId && gameMode === 'exact') {
       const secretIndex = preparedPlayers.findIndex((player) => player.id === secretWinnerId);
       const totalPlayers = preparedPlayers.length;
-      const firstSecretGuess = secretIndex + 1;
-      const maxRigGuess =
-        firstSecretGuess +
-        totalPlayers * Math.floor((maxNumber - firstSecretGuess) / totalPlayers);
-      const safeMax = Math.max(1, maxRigGuess);
-      rigAfterGuesses = Math.max(1, Math.floor(Math.random() * safeMax) + 1);
+      rigAfterGuesses = totalPlayers * RIG_ROUNDS_BEFORE_WIN + (secretIndex + 1);
+      riggedTarget = generateTarget(maxNumber);
     }
     riggedRoundRef.current = {
       secretWinnerId,
       rigAfterGuesses,
       secretQuickfireGuess: null,
+      riggedTarget,
     };
 
     setPlayers(preparedPlayers);
     if (gameMode === 'exact' && secretWinnerId) {
-      setTargetNumber(null);
+      setTargetNumber(riggedTarget);
     } else {
       setTargetNumber(generateTarget(maxNumber));
     }
@@ -157,6 +164,8 @@ function App() {
     setRemoveTargetId(null);
     setControlsCollapsed(true);
     setFeedbackCue(null);
+    setRangeMin(1);
+    setRangeMax(maxNumber);
   };
 
   const handleGuess = (event) => {
@@ -183,21 +192,69 @@ function App() {
     }
 
     const { secretWinnerId, rigAfterGuesses } = riggedRoundRef.current;
+    const isRiggedExact = gameMode === 'exact' && secretWinnerId;
+    const secretIndex = isRiggedExact
+      ? players.findIndex((player) => player.id === secretWinnerId)
+      : -1;
+    const isSecretTurn = isRiggedExact && currentPlayer?.id === secretWinnerId;
+    const stepsToSecret =
+      isRiggedExact && secretIndex >= 0
+        ? (secretIndex - currentPlayerIndex + players.length) % players.length
+        : 0;
+    const turnsUntilNextSecret = stepsToSecret === 0 ? players.length : stepsToSecret;
+    const rangeSize = Math.max(0, rangeMax - rangeMin + 1);
+    const allowNonSecretWin = isRiggedExact && !isSecretTurn && rangeSize === 1;
+    const forceNow = isSecretTurn && rangeSize <= turnsUntilNextSecret;
     const shouldRigExact =
-      gameMode === 'exact' &&
-      secretWinnerId &&
-      currentPlayer?.id === secretWinnerId &&
-      rigAfterGuesses !== null &&
-      guesses.length + 1 >= rigAfterGuesses;
+      isSecretTurn &&
+      ((rigAfterGuesses !== null && guesses.length + 1 >= rigAfterGuesses) || forceNow);
 
     let feedback = 'neutral';
-    if (!secretWinnerId && parsedGuess === targetNumber) {
-      feedback = 'correct';
-    }
+    if (gameMode === 'exact') {
+      let comparisonTarget = targetNumber;
+      if (isRiggedExact) {
+        const rangeFloor = rangeMin;
+        const rangeCeil = rangeMax;
+        const currentRiggedTarget =
+          typeof riggedRoundRef.current.riggedTarget === 'number'
+            ? riggedRoundRef.current.riggedTarget
+            : generateTargetInRange(rangeFloor, rangeCeil);
+        comparisonTarget =
+          typeof comparisonTarget === 'number' ? comparisonTarget : currentRiggedTarget;
 
-    if (shouldRigExact) {
-      setTargetNumber(parsedGuess);
-      feedback = 'correct';
+        if (!shouldRigExact && !allowNonSecretWin && parsedGuess === comparisonTarget) {
+          if (comparisonTarget < rangeCeil) {
+            comparisonTarget += 1;
+          } else if (comparisonTarget > rangeFloor) {
+            comparisonTarget -= 1;
+          }
+        }
+
+        riggedRoundRef.current.riggedTarget = comparisonTarget;
+        if (comparisonTarget !== targetNumber) {
+          setTargetNumber(comparisonTarget);
+        }
+      }
+
+      if (shouldRigExact) {
+        setTargetNumber(parsedGuess);
+        riggedRoundRef.current.riggedTarget = parsedGuess;
+        feedback = 'correct';
+      } else if (allowNonSecretWin && parsedGuess === comparisonTarget) {
+        setTargetNumber(parsedGuess);
+        riggedRoundRef.current.riggedTarget = parsedGuess;
+        feedback = 'correct';
+      } else if (typeof comparisonTarget === 'number') {
+        if (!isRiggedExact && parsedGuess === comparisonTarget) {
+          feedback = 'correct';
+        } else if (parsedGuess < comparisonTarget) {
+          feedback = 'higher';
+        } else if (parsedGuess > comparisonTarget) {
+          feedback = 'lower';
+        } else {
+          feedback = 'higher';
+        }
+      }
     }
 
     const timestamp = Date.now();
@@ -274,7 +331,7 @@ function App() {
       setGuesses(nextGuesses);
       setGuessValue('');
       setError('');
-      setFeedbackCue(feedback === 'correct' ? { type: feedback, id: timestamp } : null);
+      setFeedbackCue(null);
 
       if ((feedback === 'correct' || everyoneGuessed) && winningGuess?.playerId) {
         applyWin(forcedQuickfireWinnerId ?? winningGuess.playerId);
@@ -291,13 +348,39 @@ function App() {
       return;
     }
 
+    let nextRangeMin = rangeMin;
+    let nextRangeMax = rangeMax;
+    if (gameMode === 'exact' && feedback !== 'correct') {
+      if (feedback === 'higher') {
+        nextRangeMin = Math.min(rangeMax, Math.max(rangeMin, parsedGuess + 1));
+      } else if (feedback === 'lower') {
+        nextRangeMax = Math.max(rangeMin, Math.min(rangeMax, parsedGuess - 1));
+      }
+      if (nextRangeMin !== rangeMin) {
+        setRangeMin(nextRangeMin);
+      }
+      if (nextRangeMax !== rangeMax) {
+        setRangeMax(nextRangeMax);
+      }
+    }
+
+    if (isRiggedExact && feedback !== 'correct' && secretIndex >= 0 && !isSecretTurn) {
+      const remainingRange = Math.max(0, nextRangeMax - nextRangeMin + 1);
+      const forcedGuessIndex = guesses.length + stepsToSecret;
+      if (remainingRange <= stepsToSecret && rigAfterGuesses > forcedGuessIndex) {
+        riggedRoundRef.current.rigAfterGuesses = forcedGuessIndex;
+      }
+    }
+
     setGuesses((prev) => [entry, ...prev]);
     setGuessValue('');
     setError('');
-    setFeedbackCue(feedback === 'neutral' ? null : { type: feedback, id: timestamp });
+    setFeedbackCue(
+      gameMode === 'exact' && feedback !== 'neutral' ? { type: feedback, id: timestamp } : null
+    );
 
     if (feedback === 'correct') {
-      applyWin(currentPlayer.id);
+      applyWin(currentPlayer.id, { allowSecretOverride: !allowNonSecretWin });
     } else {
       setCurrentPlayerIndex((prev) =>
         players.length ? (prev + 1) % players.length : 0
@@ -368,6 +451,8 @@ function App() {
     setGuesses([]);
     setGuessValue('');
     setTargetNumber(generateTarget(maxNumber));
+    setRangeMin(1);
+    setRangeMax(maxNumber);
 
     if (remaining.length) {
       setCurrentPlayerIndex((prev) =>
@@ -413,9 +498,11 @@ function App() {
     }
   };
 
-  const applyWin = (winnerId) => {
+  const applyWin = (winnerId, { allowSecretOverride = true } = {}) => {
     setPlayers((prev) => {
-      const forcedWinnerId = getSecretWinnerId(prev) ?? winnerId;
+      const forcedWinnerId = allowSecretOverride
+        ? getSecretWinnerId(prev) ?? winnerId
+        : winnerId;
       const updated = prev.map((player) => {
         if (player.id === forcedWinnerId) {
           return {
@@ -447,6 +534,8 @@ function App() {
     setRemoveTargetId(null);
     setControlsCollapsed(false);
     setError('');
+    setRangeMin(1);
+    setRangeMax(maxNumber);
   };
 
   const handleGuessOrderChange = (nextMode) => {
@@ -459,6 +548,8 @@ function App() {
     setRemoveTargetId(null);
     setControlsCollapsed(false);
     setError('');
+    setRangeMin(1);
+    setRangeMax(maxNumber);
   };
 
   const reorderPlayers = (sourceId, targetId) => {
@@ -514,7 +605,10 @@ function App() {
 
   let effectiveMin = 1;
   let effectiveMax = maxNumber;
-
+  if (gameMode === 'exact') {
+    effectiveMin = rangeMin;
+    effectiveMax = rangeMax;
+  }
   if (effectiveMin > effectiveMax) {
     const collapsed = Math.max(1, Math.min(effectiveMin, effectiveMax));
     effectiveMin = collapsed;
@@ -535,7 +629,13 @@ function App() {
 
   const inRangeHint = `${effectiveMin} to ${effectiveMax}`;
   const canGuess = status === 'active' && players.length > 0;
-  const showGuessFeedback = feedbackCue?.type === 'correct';
+  const showGuessFeedback = gameMode === 'exact' && !!feedbackCue?.type;
+  const feedbackLabel =
+    feedbackCue?.type === 'higher'
+      ? 'Higher'
+      : feedbackCue?.type === 'lower'
+        ? 'Lower'
+        : 'Correct!';
   const modeLabel = gameMode === 'exact' ? 'Exact Match' : 'Quickfire Closest';
   const statusLabel = status === 'won' ? 'Winner' : status === 'active' ? 'In-Progress' : 'Setting up';
   const isGuessOrderDisabled = false;
@@ -889,9 +989,7 @@ function App() {
                       <div
                         className={`guess-feedback guess-feedback--${feedbackCue.type}`}
                       >
-                        <span className="guess-feedback__label">
-                          Correct!
-                        </span>
+                        <span className="guess-feedback__label">{feedbackLabel}</span>
                       </div>
                     )}
                   </div>
@@ -945,8 +1043,12 @@ function App() {
                           {winner?.id === guess.playerId ? 'Closest' : 'Guess'}
                         </span>
                       ) : (
-                        <span className={`pill pill--${guess.feedback === 'correct' ? 'correct' : 'incorrect'}`}>
-                          {guess.feedback === 'correct' ? 'Correct!' : 'Incorrect'}
+                        <span className={`pill pill--${guess.feedback}`}>
+                          {guess.feedback === 'correct'
+                            ? 'Correct!'
+                            : guess.feedback === 'higher'
+                              ? 'Higher'
+                              : 'Lower'}
                         </span>
                       )}
                     </li>
